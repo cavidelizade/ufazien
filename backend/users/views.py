@@ -1,3 +1,5 @@
+import logging
+
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from rest_framework.views import APIView
@@ -22,12 +24,16 @@ import os
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
 
 User = get_user_model()
 
 
 class SignupView(APIView):
     permission_classes = []
+    # Rate limited by IP. Creating accounts had no ceiling either.
+    throttle_scope = 'signup'
 
     def post(self, request):
         print(f"[SIGNUP] Request received - data keys: {list(request.data.keys())}")
@@ -35,7 +41,7 @@ class SignupView(APIView):
         if serializer.is_valid():
             print("[SIGNUP] Serializer valid, creating user")
             user = serializer.save()
-            print(f"[SIGNUP] User created - id={user.id}, email={user.email}, username={user.username}")
+            logger.info("Signup: created user id=%s", user.id)
             
             # Send welcome email
             try:
@@ -56,42 +62,47 @@ class SignupView(APIView):
 
 class LoginView(APIView):
     permission_classes = []
+    # Signing in had no limit at all, so a password could be guessed as fast as
+    # the network allowed. See `DEFAULT_THROTTLE_RATES` for the rate; it is
+    # generous enough that mistyping yours a few times is unaffected.
+    throttle_scope = 'login'
 
     def post(self, request):
-        print(f"[LOGIN] Request received - data keys: {list(request.data.keys())}")
+        # No email in the log line. Every attempt used to print the address
+        # somebody typed, which put user emails in the application logs — and
+        # a failed sign-in is exactly where somebody else's address might be.
+        logger.info("Login attempt received")
         serializer = LoginSerializer(data=request.data)
         if not serializer.is_valid():
-            print(f"[LOGIN] Validation failed: {serializer.errors}")
+            logger.info("Login rejected: the request was not valid")
             serializer.is_valid(raise_exception=True)
         
         email = serializer.validated_data["email"]
         password = serializer.validated_data["password"]
-        print(f"[LOGIN] Login attempt for email: {email}")
-        
+
         # Try authenticating with email as username first (for regular signup users)
         user = authenticate(request, username=email, password=password)
-        print(f"[LOGIN] First auth attempt result: {'SUCCESS' if user else 'FAILED'}")
         
         # If that fails, try to find user by email and authenticate with their actual username
         # This handles OAuth users who have username = email.split("@")[0]
         if user is None:
             try:
                 user_obj = User.objects.get(email=email)
-                print(f"[LOGIN] User found by email, attempting auth with username: {user_obj.username}")
                 # Try authenticating with the user's actual username
                 user = authenticate(request, username=user_obj.username, password=password)
-                print(f"[LOGIN] Second auth attempt result: {'SUCCESS' if user else 'FAILED'}")
+                logger.info("Login retry for user id=%s %s", user_obj.id,
+                            "succeeded" if user else "failed")
             except User.DoesNotExist:
-                print(f"[LOGIN] No user found with email: {email}")
+                logger.info("Login attempted for an address with no account")
                 user = None
         
         if user is not None:
-            print(f"[LOGIN] Login successful for user id={user.id}, email={user.email}")
+            logger.info("Login successful for user id=%s", user.id)
             # Send login alert email
             try:
                 NotificationService.send_login_alert_email(user, request)
             except Exception as e:
-                print(f"[LOGIN] WARNING: Failed to send login alert email to user id={user.id}: {str(e)}")
+                logger.warning("Login alert email failed for user id=%s: %s", user.id, e)
             
             refresh = RefreshToken.for_user(user)
             return Response({
@@ -99,11 +110,12 @@ class LoginView(APIView):
                 "refresh": str(refresh),
                 "user": UserSerializer(user, context={'request': request}).data
             })
-        print(f"[LOGIN] Login failed: Invalid credentials for email {email}")
+        logger.info("Login failed: invalid credentials")
         return Response({"detail": "Invalid credentials."}, status=status.HTTP_401_UNAUTHORIZED)
 
 class GoogleAuthCodeExchangeView(APIView):
     permission_classes = []
+    throttle_scope = 'login'
 
     def post(self, request):
         print("=" * 80)
@@ -183,25 +195,25 @@ class GoogleAuthCodeExchangeView(APIView):
             print("[GOOGLE OAUTH] Fetching user info from Google API...")
             oauth2 = build("oauth2", "v2", credentials=credentials)
             user_info = oauth2.userinfo().get().execute()
-            print(f"[GOOGLE OAUTH] User info retrieved. Keys: {list(user_info.keys())}")
             
             email = user_info.get("email")
             username = user_info.get("email").split("@")[0] if user_info.get("email") else None
             first_name = user_info.get("given_name", "")
             last_name = user_info.get("family_name", "")
             
-            print(f"[GOOGLE OAUTH] Extracted user data:")
-            print(f"[GOOGLE OAUTH]   Email: {email}")
-            print(f"[GOOGLE OAUTH]   Username: {username}")
-            print(f"[GOOGLE OAUTH]   First name: {first_name}")
-            print(f"[GOOGLE OAUTH]   Last name: {last_name}")
+            # Names, not values. `username` here is the address's local part,
+            # so printing it published most of the address; `user_info` is the
+            # whole Google profile, address and picture included.
+            logger.info("Google OAuth: profile carried %s", ", ".join(sorted(user_info.keys())))
 
             if not email:
-                print("[GOOGLE OAUTH] ERROR: No email returned from Google")
-                print(f"[GOOGLE OAUTH] Full user_info response: {user_info}")
+                logger.warning(
+                    "Google OAuth: no email in the profile; it carried %s",
+                    ", ".join(sorted(user_info.keys())),
+                )
                 return Response({"error": "No email returned from Google"}, status=status.HTTP_400_BAD_REQUEST)
 
-            print(f"[GOOGLE OAUTH] Creating/retrieving user with email: {email}")
+            logger.info("Google OAuth: resolving an account for the token address")
             user, created = User.objects.get_or_create(
                 email=email,
                 defaults={
@@ -212,9 +224,9 @@ class GoogleAuthCodeExchangeView(APIView):
             )
             
             if created:
-                print(f"[GOOGLE OAUTH] New user created - id={user.id}, email={user.email}, username={user.username}")
+                logger.info("Google OAuth: created user id=%s", user.id)
             else:
-                print(f"[GOOGLE OAUTH] Existing user found - id={user.id}, email={user.email}, username={user.username}")
+                logger.info("Google OAuth: matched existing user id=%s", user.id)
             
             # For OAuth users, explicitly set unusable password if newly created
             if created:
@@ -253,7 +265,7 @@ class GoogleAuthCodeExchangeView(APIView):
                     print(f"[GOOGLE OAUTH] Updated user profile for id={user.id}")
 
             refresh = RefreshToken.for_user(user)
-            print(f"[GOOGLE OAUTH] Login successful for user id={user.id}, email={user.email}")
+            logger.info("Google OAuth: login successful for user id=%s", user.id)
             print("=" * 80)
             return Response({
                 "access": str(refresh.access_token),

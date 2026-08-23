@@ -32,7 +32,7 @@ class NotificationService:
                     html_message=html_message,
                     fail_silently=False,
                 )
-                logger.info(f"Email sent successfully to {', '.join(recipient_list)}")
+                logger.info("Email sent successfully to %d recipient(s)", len(recipient_list))
             except Exception as e:
                 logger.error(f"Error sending email: {e}")
         
@@ -157,7 +157,7 @@ class NotificationService:
             notification.email_sent = True
             notification.save(update_fields=['email_sent'])
             
-            logger.info(f"Email queued for {notification.recipient.email}")
+            logger.info("Email queued for user id=%s", notification.recipient_id)
             
         except Exception as e:
             logger.error(f"Error preparing email notification: {e}")
@@ -171,7 +171,7 @@ class NotificationService:
                 )
                 notification.email_sent = True
                 notification.save(update_fields=['email_sent'])
-                logger.info(f"Fallback email queued for {notification.recipient.email}")
+                logger.info("Fallback email queued for user id=%s", notification.recipient_id)
             except Exception as fallback_error:
                 logger.error(f"Even fallback email failed: {fallback_error}")
     
@@ -425,7 +425,7 @@ class NotificationService:
             )
             
             if not preferences.email_on_registration:
-                print(f"Welcome email skipped for {user.email} - user preference disabled")
+                logger.info("Welcome email skipped for user id=%s: disabled by preference", user.id)
                 return False
             
             subject = f"Welcome to UFAZIEN - {user.first_name or user.username}!"
@@ -455,7 +455,7 @@ class NotificationService:
                 recipient_list=[user.email]
             )
             
-            logger.info(f"Welcome email queued for {user.email}")
+            logger.info("Welcome email queued for user id=%s", user.id)
             return True
             
         except Exception as e:
@@ -472,7 +472,7 @@ class NotificationService:
             )
             
             if not preferences.email_on_login:
-                print(f"Login alert email skipped for {user.email} - user preference disabled")
+                logger.info("Login alert email skipped for user id=%s: disabled by preference", user.id)
                 return False
             
             from django.utils import timezone
@@ -522,7 +522,7 @@ class NotificationService:
                 recipient_list=[user.email]
             )
             
-            logger.info(f"Login alert email queued for {user.email}")
+            logger.info("Login alert email queued for user id=%s", user.id)
             return True
             
         except Exception as e:
