@@ -2,6 +2,8 @@ import logging
 import os
 import uuid
 import json
+from contextlib import closing
+
 from celery import shared_task
 from django.conf import settings
 from django.utils import timezone
@@ -240,38 +242,37 @@ def set_database_password(self, database_id: str, new_password: str):
                 raise RuntimeError('psycopg2 not installed')
 
             admin_conf = getattr(settings, 'DB_ADMIN', {}).get('postgresql', {})
-            conn = psycopg2.connect(
+            # `closing`, because the task retries three times and this runs for
+            # every rotation: closing only on the success path leaks a socket
+            # on the admin server each time an `ALTER` fails.
+            with closing(psycopg2.connect(
                 host=admin_conf.get('host', 'postgres.ufazien.com'),
                 port=int(admin_conf.get('port', 5433)),
                 user=admin_conf.get('user'),
                 password=admin_conf.get('password'),
-            )
-            conn.autocommit = True
-            cur = conn.cursor()
-            cur.execute(
-                sql.SQL("ALTER ROLE {} WITH PASSWORD %s;").format(sql.Identifier(username)),
-                [new_password],
-            )
-            cur.close()
-            conn.close()
+            )) as conn:
+                conn.autocommit = True
+                with conn.cursor() as cur:
+                    cur.execute(
+                        sql.SQL("ALTER ROLE {} WITH PASSWORD %s;").format(sql.Identifier(username)),
+                        [new_password],
+                    )
         else:
             pymysql = _import_pymysql()
             if not pymysql:
                 raise RuntimeError('pymysql not installed')
 
             admin_conf = getattr(settings, 'DB_ADMIN', {}).get('mysql', {})
-            conn = pymysql.connect(
+            with closing(pymysql.connect(
                 host=admin_conf.get('host', 'mysql.ufazien.com'),
                 port=int(admin_conf.get('port', 3306)),
                 user=admin_conf.get('user'),
                 password=admin_conf.get('password'),
                 autocommit=True,
-            )
-            cur = conn.cursor()
-            cur.execute("ALTER USER %s@'%%' IDENTIFIED BY %s;", (username, new_password))
-            cur.execute("FLUSH PRIVILEGES;")
-            cur.close()
-            conn.close()
+            )) as conn:
+                with closing(conn.cursor()) as cur:
+                    cur.execute("ALTER USER %s@'%%' IDENTIFIED BY %s;", (username, new_password))
+                    cur.execute("FLUSH PRIVILEGES;")
 
         # Only once the server has taken it. Storing it first would leave the
         # dashboard showing a password that does not work.
@@ -288,7 +289,7 @@ def set_database_password(self, database_id: str, new_password: str):
         logger.exception('Could not change the password for database %s', db.id)
         db.error_message = 'Could not change the password. Please try again.'
         db.save(update_fields=['error_message'])
-        raise self.retry(exc=exc)
+        raise self.retry(exc=exc) from exc
 
 
 @shared_task(bind=True, default_retry_delay=10, max_retries=3)
