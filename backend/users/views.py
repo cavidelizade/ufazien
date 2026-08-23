@@ -118,48 +118,33 @@ class GoogleAuthCodeExchangeView(APIView):
     throttle_scope = 'login'
 
     def post(self, request):
-        print("=" * 80)
-        print("[GOOGLE OAUTH] Request received")
-        print(f"[GOOGLE OAUTH] Request method: {request.method}")
-        print(f"[GOOGLE OAUTH] Request path: {request.path}")
-        print(f"[GOOGLE OAUTH] Request data keys: {list(request.data.keys())}")
-        print(f"[GOOGLE OAUTH] Request META (relevant): {[(k, request.META.get(k)) for k in request.META.keys() if 'HTTP_' in k or 'CONTENT_TYPE' in k]}")
-        
+        # Shapes, not contents.
+        #
+        # This block used to print every `HTTP_*` header — `Authorization` and
+        # `Cookie` among them — forty characters of the authorization code
+        # across two lines, and the whole request body whenever the code was
+        # missing. An authorization code is a live credential: it is short and
+        # single-use, but until it is redeemed it exchanges for somebody's
+        # tokens, and logs outlive the exchange.
+        logger.info("Google OAuth: request carried %s", ", ".join(sorted(request.data.keys())))
+
         code = request.data.get("code")
         code_verifier = request.data.get("code_verifier")  # Optional PKCE parameter
-        print(f"[GOOGLE OAUTH] Code extracted: {code is not None}")
-        print(f"[GOOGLE OAUTH] Code verifier present: {code_verifier is not None}")
-        if code:
-            print(f"[GOOGLE OAUTH] Code length: {len(code)}")
-            print(f"[GOOGLE OAUTH] Code first 30 chars: {code[:30]}...")
-            print(f"[GOOGLE OAUTH] Code last 10 chars: ...{code[-10:]}")
-            if code_verifier:
-                print(f"[GOOGLE OAUTH] Code verifier length: {len(code_verifier)}")
-                print(f"[GOOGLE OAUTH] Using PKCE flow (mobile app)")
-            else:
-                print(f"[GOOGLE OAUTH] Using standard flow (web app)")
-        else:
-            print("[GOOGLE OAUTH] ERROR: Code is None or missing")
-            print(f"[GOOGLE OAUTH] Full request.data: {request.data}")
+        if not code:
+            logger.info("Google OAuth: rejected, no authorization code in the request")
             return Response({"error": "Missing code"}, status=status.HTTP_400_BAD_REQUEST)
+
+        logger.info("Google OAuth: %s flow", "PKCE" if code_verifier else "standard")
 
         CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID")
         CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET")
         REDIRECT_URI = "postmessage"
         
-        print(f"[GOOGLE OAUTH] Environment check:")
-        print(f"[GOOGLE OAUTH]   CLIENT_ID present: {bool(CLIENT_ID)}")
-        print(f"[GOOGLE OAUTH]   CLIENT_SECRET present: {bool(CLIENT_SECRET)}")
-        print(f"[GOOGLE OAUTH]   CLIENT_ID length: {len(CLIENT_ID) if CLIENT_ID else 0}")
-        print(f"[GOOGLE OAUTH]   CLIENT_SECRET length: {len(CLIENT_SECRET) if CLIENT_SECRET else 0}")
-        print(f"[GOOGLE OAUTH]   REDIRECT_URI: {REDIRECT_URI}")
-        
         if not CLIENT_ID or not CLIENT_SECRET:
-            print("[GOOGLE OAUTH] ERROR: Missing Google OAuth credentials in environment")
+            logger.error("Google OAuth: CLIENT_ID or CLIENT_SECRET is not set")
             return Response({"error": "Server configuration error: Missing Google OAuth credentials"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         try:
-            print("[GOOGLE OAUTH] Initializing Flow...")
             flow = Flow.from_client_config(
                 {
                     "web": {
@@ -177,22 +162,14 @@ class GoogleAuthCodeExchangeView(APIView):
                 ],
                 redirect_uri=REDIRECT_URI,
             )
-            print("[GOOGLE OAUTH] Flow initialized successfully")
-            
             # Token exchange with optional PKCE support
             if code_verifier:
-                print(f"[GOOGLE OAUTH] Attempting PKCE token exchange with code (length={len(code)}) and code_verifier (length={len(code_verifier)})...")
                 flow.fetch_token(code=code, code_verifier=code_verifier)
             else:
-                print(f"[GOOGLE OAUTH] Attempting standard token exchange with code (length={len(code)})...")
                 flow.fetch_token(code=code)
             credentials = flow.credentials
-            print("[GOOGLE OAUTH] Token exchange successful!")
-            print(f"[GOOGLE OAUTH] Token type: {type(credentials)}")
-            print(f"[GOOGLE OAUTH] Has access token: {hasattr(credentials, 'token')}")
+            logger.info("Google OAuth: token exchange succeeded")
 
-            # Get user info from Google
-            print("[GOOGLE OAUTH] Fetching user info from Google API...")
             oauth2 = build("oauth2", "v2", credentials=credentials)
             user_info = oauth2.userinfo().get().execute()
             
@@ -232,41 +209,35 @@ class GoogleAuthCodeExchangeView(APIView):
             if created:
                 user.set_unusable_password()
                 user.save()
-                print(f"[GOOGLE OAUTH] Set unusable password for new user id={user.id}")
 
             # Send welcome email for new Google OAuth users
             if created:
                 try:
                     NotificationService.send_welcome_email(user)
-                    print(f"[GOOGLE OAUTH] Welcome email sent to new user id={user.id}")
                 except Exception as e:
-                    print(f"[GOOGLE OAUTH] WARNING: Failed to send welcome email to user id={user.id}: {str(e)}")
+                    logger.warning("Google OAuth: welcome email failed for user id=%s: %s", user.id, type(e).__name__)
             else:
                 # Send login alert for existing users
                 try:
                     NotificationService.send_login_alert_email(user, request)
-                    print(f"[GOOGLE OAUTH] Login alert email sent to existing user id={user.id}")
                 except Exception as e:
-                    print(f"[GOOGLE OAUTH] WARNING: Failed to send login alert email to user id={user.id}: {str(e)}")
+                    logger.warning("Google OAuth: login alert failed for user id=%s: %s", user.id, type(e).__name__)
 
             # Optionally update names if user exists and info has changed
             updated = False
             if not created:
                 if user.first_name != first_name:
-                    print(f"[GOOGLE OAUTH] Updating first_name for user id={user.id} from '{user.first_name}' to '{first_name}'")
                     user.first_name = first_name
                     updated = True
                 if user.last_name != last_name:
-                    print(f"[GOOGLE OAUTH] Updating last_name for user id={user.id} from '{user.last_name}' to '{last_name}'")
                     user.last_name = last_name
                     updated = True
                 if updated:
                     user.save()
-                    print(f"[GOOGLE OAUTH] Updated user profile for id={user.id}")
+                    logger.info("Google OAuth: refreshed the name on user id=%s", user.id)
 
             refresh = RefreshToken.for_user(user)
             logger.info("Google OAuth: login successful for user id=%s", user.id)
-            print("=" * 80)
             return Response({
                 "access": str(refresh.access_token),
                 "refresh": str(refresh),
@@ -279,29 +250,27 @@ class GoogleAuthCodeExchangeView(APIView):
                 }
             })
         except Exception as e:
-            import traceback
-            error_type = type(e).__name__
             error_message = str(e)
-            error_traceback = traceback.format_exc()
-            
-            print("=" * 80)
-            print("[GOOGLE OAUTH] ERROR: Exception occurred")
-            print(f"[GOOGLE OAUTH] Error type: {error_type}")
-            print(f"[GOOGLE OAUTH] Error message: {error_message}")
-            print(f"[GOOGLE OAUTH] Full traceback:")
-            print(error_traceback)
-            print("=" * 80)
-            
-            # Log specific error types for better debugging
+
+            # The traceback goes to the log, where the operator can read it.
+            # It used to go to stdout *and* the message went back to the
+            # browser, and a failure from Google quotes what was sent — which
+            # on an `invalid_client` is the client secret.
+            logger.exception("Google OAuth: exchange failed")
+
             if "invalid_grant" in error_message.lower():
-                print("[GOOGLE OAUTH] DIAGNOSIS: Invalid grant error - Code may be expired, already used, or redirect_uri mismatch")
+                logger.info("Google OAuth: the code was expired, already used, "
+                            "or the redirect_uri did not match")
             elif "invalid_client" in error_message.lower():
-                print("[GOOGLE OAUTH] DIAGNOSIS: Invalid client error - CLIENT_ID or CLIENT_SECRET may be incorrect")
-            elif "redirect_uri_mismatch" in error_message.lower() or "redirect" in error_message.lower():
-                print("[GOOGLE OAUTH] DIAGNOSIS: Redirect URI mismatch - The redirect_uri used in OAuth flow doesn't match backend expectation")
-                print(f"[GOOGLE OAUTH] DIAGNOSIS: Backend expects redirect_uri: '{REDIRECT_URI}'")
-            
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+                logger.info("Google OAuth: CLIENT_ID or CLIENT_SECRET is wrong")
+            elif "redirect" in error_message.lower():
+                logger.info("Google OAuth: redirect_uri mismatch; this end expects %r",
+                            REDIRECT_URI)
+
+            return Response(
+                {"error": "Could not complete the Google sign-in. Please try again."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         
 def can_view_profile(viewer, target):
     """Whether `viewer` may see `target`'s full profile.

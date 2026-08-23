@@ -34,7 +34,10 @@ class NotificationService:
                 )
                 logger.info("Email sent successfully to %d recipient(s)", len(recipient_list))
             except Exception as e:
-                logger.error(f"Error sending email: {e}")
+                # The class, not the message. An SMTP failure quotes the
+                # envelope back — recipient addresses, and on an auth failure
+                # the credentials the backend connected with.
+                logger.error("Error sending email: %s", type(e).__name__)
         
         # Start email sending in background thread
         email_thread = threading.Thread(target=_send_email)
