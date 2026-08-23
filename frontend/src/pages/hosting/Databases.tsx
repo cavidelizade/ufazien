@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react"
-import { hostingApi, type HostingDatabase } from "../../utils/hostingApi"
+import type { HostingDatabase } from "../../utils/hostingApi"
 import { errorMessage } from "../../lib/api/errors"
 import { copyText } from "../../lib/clipboard"
 import { Helmet } from "react-helmet"
@@ -140,11 +140,11 @@ export default function Databases() {
     }
 
     try {
-      // The endpoint that changes it on the database server, rather than a
-      // PATCH that only rewrote the row we display. Password is read-only on
-      // the serializer now for the same reason: a rotation that does not reach
-      // the server leaves the old credential live and the new one broken.
-      await hostingApi.changeDatabasePassword(databaseId, newPassword)
+      // Through the hook, which routes a password-only update to the endpoint
+      // that changes it on the database server and then refetches the row.
+      // Calling that endpoint directly skips the refetch, and the Password
+      // field goes on showing the old value until the page is reloaded.
+      await updateDatabase(databaseId, { password: newPassword })
       setChangingPassword(prev => ({ ...prev, [databaseId]: false }))
       setNewPasswords(prev => ({ ...prev, [databaseId]: '' }))
       toast.success('Password changed. It may take a moment to take effect.')
