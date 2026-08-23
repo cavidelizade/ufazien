@@ -126,6 +126,36 @@ CORS_ALLOW_CREDENTIALS = True
 # Allow all headers for multipart/form-data uploads
 CORS_ALLOW_ALL_HEADERS = True
 
+#: Validated here rather than inline, because a bad value does not fail where
+#: it is set: a negative number makes DRF index past the end of the header, so
+#: every throttled request raises `IndexError` — a 500 on sign-in — and it does
+#: it at request time, not at boot.
+#:
+#: The default is 1 rather than nothing, because that is this deployment: one
+#: Traefik, in front of one container, and Coolify puts it there. A missing
+#: value is therefore right rather than merely tolerated, which is not true of
+#: `SECRET_KEY` above — there, any default at all is forgeable, so there is
+#: none.
+#: An empty value is treated as unset, not as a malformed one — Coolify hands
+#: over a variable that has been cleared as `''`, and refusing to boot over
+#: that would be a worse failure than the one being prevented.
+try:
+    NUM_PROXIES = int(os.getenv('NUM_PROXIES', '').strip() or '1')
+except ValueError:
+    raise ImproperlyConfigured(
+        f"NUM_PROXIES must be a whole number, not {os.getenv('NUM_PROXIES')!r}. "
+        "It is how many proxies sit in front of this application: 1 for the "
+        "Coolify deployment, which is one Traefik."
+    )
+
+if NUM_PROXIES < 0:
+    raise ImproperlyConfigured(
+        f"NUM_PROXIES cannot be negative (got {NUM_PROXIES}). It is a count of "
+        "proxies in front of this application: 0 when nothing is, 1 for the "
+        "Coolify deployment, which is one Traefik."
+    )
+
+
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "rest_framework_simplejwt.authentication.JWTAuthentication",
@@ -152,12 +182,21 @@ REST_FRAMEWORK = {
     #: attempt — which is the rate limit not existing. Verified: with the
     #: header rotated, thirteen wrong passwords in a row all returned 401.
     #:
-    #: Set to the number of hops, so DRF counts back from the end and reads the
-    #: address the proxy itself recorded. Deployment is Coolify, which puts one
-    #: Traefik in front of the container. Raise it if another proxy is added in
-    #: front of that — Cloudflare in proxy mode would make it 2 — because too
-    #: low reads an address the caller controls, and too high reads a proxy's.
-    'NUM_PROXIES': int(os.getenv('NUM_PROXIES', '1')),
+    #: Set to the number of hops, so DRF counts back from the end of the header
+    #: and reads the address a proxy recorded rather than one the caller wrote.
+    #: Deployment is Coolify, which puts one Traefik in front of the container.
+    #:
+    #: Both directions of getting it wrong are worth knowing, and they are not
+    #: symmetric:
+    #:
+    #: - **Too high** reads too far left, into the part the caller wrote. With
+    #:   `2` against one real proxy, `X-Forwarded-For: FAKE, <client>` resolves
+    #:   to `FAKE`, and identities rotate freely. This is the insecure one.
+    #: - **Too low** reads too far right, into the proxies. With `1` against
+    #:   Cloudflare in front of Traefik, it resolves to Cloudflare's address,
+    #:   and everybody behind that edge shares one bucket — so one person
+    #:   guessing passwords locks out everybody else.
+    'NUM_PROXIES': NUM_PROXIES,
     'PAGE_SIZE': 10,  # Default page size for pagination
 }
 

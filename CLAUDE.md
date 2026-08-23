@@ -199,9 +199,18 @@ DRF identifies a caller by address, and unset it uses the whole
 `X-Forwarded-For` header — which the caller writes and Traefik appends to
 rather than replaces, so anybody could rotate a made-up value and get a fresh
 budget for every attempt. Coolify puts one Traefik in front of the container,
-so it is 1. Putting another proxy in front (Cloudflare in proxy mode) makes it
-2: too low reads an address the caller controls, too high reads a proxy's and
-counts everybody against one bucket.
+so it is 1. Putting another proxy in front — Cloudflare in proxy mode — makes
+it 2.
+
+Both ways of getting it wrong bite, and not symmetrically. DRF counts back from
+the *end* of the header, so **too high** reads too far left, into the part the
+caller wrote: at `2` against one real proxy, `X-Forwarded-For: FAKE, <client>`
+resolves to `FAKE` and identities rotate freely. **Too low** reads too far
+right, into the proxies: at `1` behind Cloudflare, every caller resolves to
+Cloudflare's address and shares one bucket, so one person guessing passwords
+locks out everybody. Negative is worse than either — DRF indexes past the end
+of the header and every throttled request raises `IndexError`, so `settings.py`
+refuses to start rather than turning sign-in into a 500.
 
 ## Releases
 

@@ -691,3 +691,117 @@ class OAuthLogPrivacyTests(TestCase):
         source = inspect.getsource(views.GoogleAuthCodeExchangeView.post)
 
         self.assertNotIn('print(', source)
+
+
+class ProxyHopSettingTests(TestCase):
+    """
+    `NUM_PROXIES` is a count of proxies in front of the application, and DRF
+    counts back from the end of `X-Forwarded-For` with it. Both ways of getting
+    it wrong bite, and not in the same way — which the first version of this
+    documented backwards.
+    """
+
+    def ident(self, xff, remote, num_proxies):
+        """`SimpleRateThrottle.get_ident`, given a topology."""
+        from unittest.mock import patch
+
+        # `ScopedRateThrottle`, because `SimpleRateThrottle.__init__` resolves
+        # a rate from `self.scope` and there is none to resolve here. It is the
+        # class the application actually throttles with, and `get_ident` is
+        # inherited unchanged.
+        from rest_framework.throttling import ScopedRateThrottle
+
+        request = type('R', (), {})()
+        request.META = {'HTTP_X_FORWARDED_FOR': xff, 'REMOTE_ADDR': remote}
+
+        with patch('rest_framework.throttling.api_settings') as api_settings:
+            api_settings.NUM_PROXIES = num_proxies
+            return ScopedRateThrottle().get_ident(request)
+
+    def test_the_configured_value_reads_the_address_traefik_recorded(self):
+        """One proxy, which is this deployment, and a caller forging the header."""
+        self.assertEqual(self.ident('FAKE, 203.0.113.7', '10.0.0.1', 1), '203.0.113.7')
+
+    def test_too_high_reads_what_the_caller_wrote(self):
+        """
+        Counting back too far reaches into the part the caller supplied, so
+        identities rotate freely. This is the insecure direction.
+        """
+        self.assertEqual(self.ident('FAKE, 203.0.113.7', '10.0.0.1', 2), 'FAKE')
+
+    def test_too_low_reads_the_proxys_own_address(self):
+        """
+        Behind Cloudflare and Traefik, counting only one hop resolves every
+        caller to Cloudflare — one bucket for everybody, so one person guessing
+        passwords locks out the rest.
+        """
+        self.assertEqual(self.ident('203.0.113.7, 198.51.100.1', '10.0.0.1', 1), '198.51.100.1')
+
+    def test_unset_uses_the_whole_header_which_is_the_bug_this_setting_fixes(self):
+        self.assertEqual(self.ident('FAKE, 203.0.113.7', '10.0.0.1', None), 'FAKE,203.0.113.7')
+
+    def test_zero_ignores_the_header_entirely(self):
+        """For a deployment with nothing in front of it."""
+        self.assertEqual(self.ident('FAKE', '10.0.0.1', 0), '10.0.0.1')
+
+
+class ProxyHopStartupTests(TestCase):
+    """A bad value does not fail where it is set: DRF indexes past the end of
+    the header at request time, so sign-in 500s instead of the server refusing
+    to start."""
+
+    def django_starts(self, value):
+        import subprocess
+        import sys
+
+        env = dict(os.environ, DJANGO_SETTINGS_MODULE='ufazien.settings',
+                   SECRET_KEY='a-key-for-this-subprocess')
+        if value is None:
+            env.pop('NUM_PROXIES', None)
+        else:
+            env['NUM_PROXIES'] = value
+
+        finished = subprocess.run(
+            [sys.executable, '-c',
+             'import django; django.setup();'
+             'from rest_framework.settings import api_settings;'
+             'print(api_settings.NUM_PROXIES)'],
+            capture_output=True, text=True, env=env,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        )
+        return finished.returncode == 0, finished.stdout.strip(), finished.stderr
+
+    def test_a_negative_count_refuses_to_start(self):
+        started, _, stderr = self.django_starts('-1')
+
+        self.assertFalse(started, 'a negative proxy count was accepted')
+        self.assertIn('NUM_PROXIES', stderr)
+
+    def test_something_that_is_not_a_number_refuses_to_start(self):
+        for value in ('abc', '1.5'):
+            started, _, stderr = self.django_starts(value)
+
+            self.assertFalse(started, value)
+            self.assertIn('NUM_PROXIES', stderr)
+
+    def test_unset_is_the_deployment_this_runs_on(self):
+        """One Traefik, which is what Coolify puts in front of the container."""
+        started, value, stderr = self.django_starts(None)
+
+        self.assertTrue(started, stderr[-400:])
+        self.assertEqual(value, '1')
+
+    def test_an_empty_value_is_treated_as_unset(self):
+        """Coolify hands over a cleared variable as an empty string, and
+        refusing to boot over that would be worse than the problem."""
+        for value in ('', '   '):
+            started, resolved, stderr = self.django_starts(value)
+
+            self.assertTrue(started, stderr[-400:])
+            self.assertEqual(resolved, '1')
+
+    def test_a_real_topology_change_is_still_allowed(self):
+        started, value, stderr = self.django_starts('2')
+
+        self.assertTrue(started, stderr[-400:])
+        self.assertEqual(value, '2')
