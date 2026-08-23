@@ -27,3 +27,7 @@ id_ed25519*
 
 # Installed dependencies and tooling caches, which are not source
 node_modules/
+
+# Python bytecode, wherever it lands (.github/scripts has tests that run in CI)
+__pycache__/
+*.pyc

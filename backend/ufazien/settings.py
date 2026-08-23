@@ -31,6 +31,21 @@ SECRET_KEY = os.getenv("SECRET_KEY", "django-insecure-default-key-for-developmen
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.getenv("DJANGO_DEBUG", "False").strip().lower() in ("true", "1", "yes", "on")
 # Fix ALLOWED_HOSTS with fallback
+#: The fallback above is published in this repository, and everything Django
+#: signs comes from this value — session cookies, password-reset links, and the
+#: JWTs the API authenticates with. Running on it in production means anybody
+#: who can read the source can mint a token for any account, so the server
+#: refuses to start rather than doing that quietly.
+#:
+#: Setting it for the first time invalidates existing sessions and tokens:
+#: everybody is signed out once, which is the rotation working.
+if not DEBUG and SECRET_KEY.startswith("django-insecure"):
+    raise ImproperlyConfigured(
+        "SECRET_KEY is unset, so Django is using the development fallback that "
+        "is published in this repository. Set the SECRET_KEY environment "
+        "variable before starting with DEBUG off."
+    )
+
 ALLOWED_HOSTS_ENV = os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1,testserver,api.ufazien.com")
 ALLOWED_HOSTS = [host.strip() for host in ALLOWED_HOSTS_ENV.split(",") if host.strip()]
 
@@ -109,8 +124,17 @@ REST_FRAMEWORK = {
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ],
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    'DEFAULT_THROTTLE_CLASSES': [
+        'rest_framework.throttling.ScopedRateThrottle',
+    ],
     'DEFAULT_THROTTLE_RATES': {
         'feedback': '12/hour',  # 12 per hour = 1 per 5 minutes
+        # Signing in had no limit at all, so a password could be guessed as
+        # fast as the network allowed. Generous enough that somebody mistyping
+        # theirs a few times is unaffected.
+        'login': os.getenv('LOGIN_RATE_LIMIT', '10/min'),
+        'signup': os.getenv('SIGNUP_RATE_LIMIT', '20/hour'),
+        'password_reset': os.getenv('PASSWORD_RESET_RATE_LIMIT', '5/hour'),
     },
     'PAGE_SIZE': 10,  # Default page size for pagination
 }

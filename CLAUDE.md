@@ -61,6 +61,42 @@ starts at the API client, so a browser check still matters for anything visual. 
 
 **Never commit secrets.** `.env`, keys and certificates are gitignored. A private key was committed here once and is still in history.
 
+**`SECRET_KEY` must be set in the environment.** The fallback in `settings.py`
+is published in this repository, and everything Django signs comes from it —
+including the JWTs the API authenticates with, so anybody who can read the
+source could mint a token for any account. With `DEBUG` off and no key set the
+server refuses to start rather than doing that quietly. Setting it for the
+first time signs everybody out once; that is the rotation working.
+
+**Credentials are minted server-side, and a password is rotated on the server
+that holds it.** A hosting database's `username` and `password` are read-only
+on the serializer: the browser used to generate both with `Math.random()` and
+post them, and what it sent became the real credential. `change_password` runs
+`ALTER ROLE`/`ALTER USER` through `set_database_password` and writes the row
+only once the server has accepted it — it used to assign the field and save, so
+the dashboard showed a new password while the real user kept the old one.
+
+**A site's files are reached through `path_within`, never `startswith`.**
+`/srv/hosting/alice` starts with `/srv/hosting/a`, and people choose their own
+subdomains, so the prefix check that used to guard `delete_file` and
+`download_file` let a site called `a` read and delete files in every site whose
+name began with an `a`. It resolves with `realpath` and compares with
+`commonpath`, which also closes a symlink planted inside the site.
+
+**Subdomains go through `hosting/domains.py`.** The name becomes a directory on
+disk and the root nginx serves, so it is not free text: `check()` lower-cases
+it, rejects anything that is not a hostname, and refuses the reserved list —
+`admin`, `login`, `api` and the rest. A site on `login.ufazien.com`, served
+under the platform's own wildcard certificate, is a convincing place to ask
+somebody for a password.
+
+**Every site shares one php-fpm pool, so `open_basedir` is what separates
+them.** `hosting/nginx/hosting.conf` sets it per request from the subdomain
+`server_name` already captured; the pool is shared, so it cannot go in the pool
+config. `/tmp` has to stay in the list — sessions and uploads live there, and a
+basedir without it breaks any site that accepts a form. Verified by serving two
+sites and reading one from the other.
+
 ## Traps this codebase has
 
 **`requirements.txt` is UTF-16 with CRLF** (a PowerShell `pip freeze` artefact). pip copes; other tools may not. Preserve the encoding when editing it.
