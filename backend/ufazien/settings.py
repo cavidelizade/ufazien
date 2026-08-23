@@ -25,26 +25,33 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.getenv("SECRET_KEY", "django-insecure-default-key-for-development")
+#: Read from the environment, with no fallback, in every mode.
+#:
+#: There used to be a literal default here, which meant the published contents
+#: of this repository were the signing key for anybody who had not set the
+#: variable. Everything Django signs comes from this value — session cookies,
+#: password-reset links, and the JWTs the API authenticates with — so that let
+#: anybody who could read the source mint a token for any account.
+#:
+#: Guarding it behind `DEBUG` was not enough: a box brought up with
+#: `DJANGO_DEBUG=true` still ran on the published key. Removing the default is
+#: what actually settles it, and costs nothing — the README, CLAUDE.md and CI
+#: all set `SECRET_KEY` already.
+#:
+#: Setting it for the first time invalidates existing sessions and tokens:
+#: everybody is signed out once, which is the rotation working.
+SECRET_KEY = os.getenv("SECRET_KEY", "").strip()
+if not SECRET_KEY:
+    raise ImproperlyConfigured(
+        "SECRET_KEY is not set. Everything Django signs comes from it, "
+        "including the JWTs the API authenticates with, so there is no safe "
+        "default to fall back to. Set the SECRET_KEY environment variable "
+        "(SECRET_KEY=dev is fine for local development)."
+    )
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.getenv("DJANGO_DEBUG", "False").strip().lower() in ("true", "1", "yes", "on")
 # Fix ALLOWED_HOSTS with fallback
-#: The fallback above is published in this repository, and everything Django
-#: signs comes from this value — session cookies, password-reset links, and the
-#: JWTs the API authenticates with. Running on it in production means anybody
-#: who can read the source can mint a token for any account, so the server
-#: refuses to start rather than doing that quietly.
-#:
-#: Setting it for the first time invalidates existing sessions and tokens:
-#: everybody is signed out once, which is the rotation working.
-if not DEBUG and SECRET_KEY.startswith("django-insecure"):
-    raise ImproperlyConfigured(
-        "SECRET_KEY is unset, so Django is using the development fallback that "
-        "is published in this repository. Set the SECRET_KEY environment "
-        "variable before starting with DEBUG off."
-    )
 
 ALLOWED_HOSTS_ENV = os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1,testserver,api.ufazien.com")
 ALLOWED_HOSTS = [host.strip() for host in ALLOWED_HOSTS_ENV.split(",") if host.strip()]

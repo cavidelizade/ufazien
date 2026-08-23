@@ -61,12 +61,15 @@ starts at the API client, so a browser check still matters for anything visual. 
 
 **Never commit secrets.** `.env`, keys and certificates are gitignored. A private key was committed here once and is still in history.
 
-**`SECRET_KEY` must be set in the environment.** The fallback in `settings.py`
-is published in this repository, and everything Django signs comes from it —
-including the JWTs the API authenticates with, so anybody who can read the
-source could mint a token for any account. With `DEBUG` off and no key set the
-server refuses to start rather than doing that quietly. Setting it for the
-first time signs everybody out once; that is the rotation working.
+**`SECRET_KEY` is read from the environment and has no fallback.** There used
+to be a literal default, which made the published contents of this repository
+the signing key for anybody who had not set the variable — and everything
+Django signs comes from it, including the JWTs the API authenticates with.
+Guarding it behind `DEBUG` was not enough, because a box brought up with
+`DJANGO_DEBUG=true` still ran on the published key, so the default is gone and
+Django refuses to start without one in any mode. `SECRET_KEY=dev` locally, as
+the commands above already show. Setting it in production for the first time
+signs everybody out once; that is the rotation working.
 
 **Credentials are minted server-side, and a password is rotated on the server
 that holds it.** A hosting database's `username` and `password` are read-only
