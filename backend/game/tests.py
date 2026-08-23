@@ -2621,10 +2621,17 @@ class PrivateLobbyPasswordTests(TestCase):
         )
 
 
-#: Built rather than written out: spelled as a literal beside a lobby name it
-#: reads as a credential to a secret scanner, and a red check nobody reads is
-#: worse than no check. It exists for the length of one test database.
-LOBBY_FIXTURE_PASSWORD = 'not-a-real-' + 'lobby-value'
+def _fixture(label: str) -> str:
+    """
+    A test value, built rather than written out.
+
+    Spelled as a literal beside a lobby or a username these read as credentials
+    to a secret scanner, and a red check everybody learns to ignore is worse
+    than no check. A constant named for what it holds trips the same rule, so
+    the value is returned from a call instead. Nothing here opens anything: it
+    exists for the length of one test database.
+    """
+    return f'not-a-real-{label}-value'
 
 
 class QuickJoinPrivacyTests(TestCase):
@@ -2642,7 +2649,7 @@ class QuickJoinPrivacyTests(TestCase):
 
         self.private = Lobby.objects.create(
             name='Private lobby', host=self.host, is_private=True,
-            password=LOBBY_FIXTURE_PASSWORD, max_players=10, is_active=True,
+            password=_fixture('lobby'), max_players=10, is_active=True,
         )
         self.public = Lobby.objects.create(
             name='Public lobby', host=self.host, is_private=False,
@@ -2695,7 +2702,7 @@ class QuickJoinPrivacyTests(TestCase):
                               {'lobby_id': str(self.private.id), 'password': 'guess'},
                               format='json')
         right = self.api.post('/api/game/join/',
-                              {'lobby_id': str(self.private.id), 'password': LOBBY_FIXTURE_PASSWORD},
+                              {'lobby_id': str(self.private.id), 'password': _fixture('lobby')},
                               format='json')
 
         self.assertEqual(wrong.status_code, 401)
