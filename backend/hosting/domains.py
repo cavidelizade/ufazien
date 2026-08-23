@@ -32,6 +32,19 @@ RESERVED_SUBDOMAINS = frozenset({
 #: What a subdomain may be made of. Also what nginx and DNS will accept.
 SUBDOMAIN = re.compile(r'^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$')
 
+#: What any accepted name may be made of — one or more of those labels.
+#:
+#: A custom domain is not hosted on anybody's behalf, so nothing here polices
+#: *which* one somebody claims. It still has to be a hostname: the first label
+#: becomes a directory, via `domain.name.split('.')[0]`, so a name this module
+#: waves through reaches the filesystem. `../etc` and `.ufazien.com` both used
+#: to, and both resolved the site root to `/srv/hosting` itself — which is
+#: every tenant's files, through the same call meant to keep them apart.
+HOSTNAME = re.compile(
+    r'^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?'
+    r'(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$'
+)
+
 
 def base_domain() -> str:
     return getattr(settings, 'HOSTING_BASE_DOMAIN', 'ufazien.com').lower()
@@ -64,11 +77,15 @@ def check(name: str) -> str:
     The name to store, or raise `ValueError` saying why not.
 
     Anything not under the base domain is a custom domain, which the platform
-    does not host on anybody's behalf and does not need to police.
+    does not choose for anybody — but whose first label still becomes a
+    directory on disk, so its syntax is checked like any other.
     """
     name = normalise(name)
     if not name:
         raise ValueError('A domain name is required.')
+
+    if not HOSTNAME.match(name):
+        raise ValueError('That is not a valid domain name.')
 
     label = subdomain_of(name)
     if label is None:

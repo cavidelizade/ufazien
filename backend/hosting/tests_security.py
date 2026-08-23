@@ -98,6 +98,46 @@ class SubdomainRuleTests(TestCase):
     def test_a_domain_of_your_own_is_not_policed(self):
         self.assertEqual(domains.check('example.com'), 'example.com')
 
+    def test_a_custom_domain_still_has_to_be_a_hostname(self):
+        """
+        Not policing *which* domain somebody claims is not the same as
+        accepting anything. `check()` used to return a name outside the base
+        domain exactly as typed, and the first label becomes a directory —
+        `domain.name.split('.')[0]`. `../etc` gave `/srv/hosting/`, so the site
+        root resolved to the whole hosting tree and `path_within` then measured
+        containment against it. Every tenant's files, through the call meant to
+        keep them apart.
+        """
+        for name in ('../etc', '../../srv', 'a/../../etc', 'not a domain', 'has_underscore.com'):
+            with self.assertRaises(ValueError, msg=name):
+                domains.check(name)
+
+    def test_a_name_with_no_first_label_is_refused(self):
+        """
+        `.ufazien.com` ends with the suffix, so the label came out empty and
+        `subdomain_of` returned None — which `check()` read as "custom domain,
+        not ours to police". `''.split('.')[0]` is `''`, the same `/srv/hosting`
+        root as above.
+        """
+        for name in ('.ufazien.com', '.example.com', '..ufazien.com'):
+            with self.assertRaises(ValueError, msg=name):
+                domains.check(name)
+
+    def test_a_multi_label_custom_domain_is_still_allowed(self):
+        """The check is on shape, not on ownership."""
+        self.assertEqual(domains.check('my.custom.domain.org'), 'my.custom.domain.org')
+
+    def test_every_accepted_name_yields_a_directory_inside_the_tree(self):
+        """The property the two bugs above broke, stated directly."""
+        import os
+
+        for name in ('alice.ufazien.com', 'example.com', 'my.custom.domain.org', 'x9.ufazien.com'):
+            root = os.path.realpath('/srv/hosting')
+            site = os.path.realpath(os.path.join(root, domains.check(name).split('.')[0]))
+
+            self.assertEqual(os.path.dirname(site), root, name)
+            self.assertNotEqual(site, root, name)
+
 
 class DomainClaimTests(TestCase):
     """A name somebody else holds should be a 400, not a 500."""
@@ -262,9 +302,10 @@ class LoginThrottleTests(TestCase):
 
 class SecretKeyGuardTests(TestCase):
     """
-    The fallback key is published in this repository, and everything Django
-    signs comes from it — including the JWTs the API authenticates with, so
-    anybody who can read the source could mint a token for any account.
+    `SECRET_KEY` had a literal default, so the published contents of this
+    repository were the signing key for anybody who had not set the variable.
+    Everything Django signs comes from it, including the JWTs the API
+    authenticates with.
 
     The guard runs while `settings.py` is being read, which is long before a
     test can call it. So this starts a real interpreter with an environment and
@@ -278,6 +319,7 @@ class SecretKeyGuardTests(TestCase):
 
         env = dict(os.environ, DJANGO_SETTINGS_MODULE='ufazien.settings')
         env.pop('SECRET_KEY', None)
+        env.pop('DJANGO_DEBUG', None)
         env.update(environment)
 
         finished = subprocess.run(
@@ -287,24 +329,47 @@ class SecretKeyGuardTests(TestCase):
         )
         return finished.returncode == 0, finished.stderr
 
-    def test_production_refuses_to_start_on_the_published_fallback(self):
+    def test_production_refuses_to_start_without_a_key(self):
         started, stderr = self.django_starts(DJANGO_DEBUG='False')
 
-        self.assertFalse(started, 'production started on the fallback key')
+        self.assertFalse(started, 'production started with no SECRET_KEY')
         self.assertIn('SECRET_KEY', stderr)
 
-    def test_production_starts_once_a_key_is_set(self):
+    def test_debug_mode_refuses_too(self):
+        """
+        Guarding this behind `DEBUG` was the first attempt, and it left a box
+        brought up with `DJANGO_DEBUG=true` running on the published key.
+        """
+        started, stderr = self.django_starts(DJANGO_DEBUG='True')
+
+        self.assertFalse(started, 'DEBUG mode started with no SECRET_KEY')
+        self.assertIn('SECRET_KEY', stderr)
+
+    def test_a_blank_key_is_not_a_key(self):
+        started, _ = self.django_starts(DJANGO_DEBUG='False', SECRET_KEY='   ')
+
+        self.assertFalse(started, 'whitespace was accepted as a key')
+
+    def test_it_starts_once_a_key_is_set(self):
         started, stderr = self.django_starts(
             DJANGO_DEBUG='False', SECRET_KEY='a-real-key-set-in-the-environment',
         )
 
         self.assertTrue(started, stderr[-600:])
 
-    def test_local_development_is_unaffected(self):
-        """Nobody should need to invent a key to run the tests or the server."""
-        started, stderr = self.django_starts(DJANGO_DEBUG='True')
+    def test_local_development_needs_only_the_documented_one_word_key(self):
+        """`SECRET_KEY=dev` is what the README and CLAUDE.md already ask for."""
+        started, stderr = self.django_starts(DJANGO_DEBUG='True', SECRET_KEY='dev')
 
         self.assertTrue(started, stderr[-600:])
+
+    def test_no_signing_key_is_published_in_the_source(self):
+        """The literal that used to be the default."""
+        import pathlib
+
+        settings_file = pathlib.Path(__file__).resolve().parent.parent / 'ufazien' / 'settings.py'
+
+        self.assertNotIn('django-insecure', settings_file.read_text())
 
 
 class LogPrivacyTests(TestCase):
@@ -491,3 +556,92 @@ class TaskErrorDisclosureTests(TestCase):
         database.refresh_from_db()
         for secret in ('postgres.ufazien.com', '5433', 'hosting_admin'):
             self.assertNotIn(secret, database.error_message, secret)
+
+
+class ConnectionLifetimeTests(TestCase):
+    """
+    The connection used to be closed only on the success path. The task retries
+    three times and runs for every rotation, so a database server that accepts
+    the connection but refuses the `ALTER` leaked a socket on the admin server
+    each time.
+    """
+
+    def test_the_connection_closes_when_the_alter_fails(self):
+        from unittest.mock import MagicMock, patch
+
+        from .tasks import set_database_password
+
+        user = User.objects.create_user(username='c', email='c@e.com', password='pw')
+        database = Database.objects.create(
+            user=user, name='db', db_type='postgresql',
+            username='user_abc', password=_fixture('old'), status='active',
+        )
+
+        connection = MagicMock()
+        connection.cursor.return_value.__enter__.return_value.execute.side_effect = \
+            RuntimeError('permission denied')
+        psycopg2 = MagicMock()
+        psycopg2.connect.return_value = connection
+
+        with patch('hosting.tasks._import_psycopg2', return_value=(psycopg2, MagicMock())):
+            with self.assertRaises(Exception):
+                set_database_password(str(database.id), 'a-new-password')
+
+        connection.close.assert_called_once()
+
+
+class OAuthLogPrivacyTests(TestCase):
+    """
+    The Google exchange printed every `HTTP_*` header — `Authorization` and
+    `Cookie` among them — forty characters of the authorization code across two
+    lines, and the whole request body when the code was missing.
+
+    An authorization code is a live credential. It is short and single-use, but
+    until it is redeemed it exchanges for somebody's tokens, and a log outlives
+    the exchange by months.
+    """
+
+    def setUp(self):
+        cache.clear()
+        self.api = APIClient()
+
+    def tearDown(self):
+        cache.clear()
+
+    def test_no_part_of_the_authorization_code_is_logged(self):
+        code = 'x4-authorization-code-that-should-never-be-written-down-9z'
+
+        with self.assertLogs(level='DEBUG') as captured:
+            self.api.post('/api/auth/google/login/', {'code': code}, format='json')
+
+        logged = '\n'.join(captured.output)
+        for fragment in (code, code[:30], code[-10:]):
+            self.assertNotIn(fragment, logged)
+
+    def test_request_headers_are_not_logged(self):
+        with self.assertLogs(level='DEBUG') as captured:
+            self.api.post(
+                '/api/auth/google/login/', {'code': 'abc'}, format='json',
+                HTTP_AUTHORIZATION='Bearer a-token-from-somebody-else',
+                HTTP_COOKIE='sessionid=somebodys-session',
+            )
+
+        logged = '\n'.join(captured.output)
+        self.assertNotIn('a-token-from-somebody-else', logged)
+        self.assertNotIn('somebodys-session', logged)
+
+    def test_a_missing_code_does_not_dump_the_request_body(self):
+        with self.assertLogs(level='DEBUG') as captured:
+            self.api.post('/api/auth/google/login/',
+                          {'code_verifier': 'the-verifier-value'}, format='json')
+
+        self.assertNotIn('the-verifier-value', '\n'.join(captured.output))
+
+    def test_the_view_no_longer_prints(self):
+        import inspect
+
+        from users import views
+
+        source = inspect.getsource(views.GoogleAuthCodeExchangeView.post)
+
+        self.assertNotIn('print(', source)
