@@ -248,6 +248,8 @@ class LoginThrottleTests(TestCase):
     """Signing in had no limit at all, so a password could be guessed as fast
     as the network allowed."""
 
+    address = 'victim@e.com'
+
     def setUp(self):
         cache.clear()
         User.objects.create_user(username='victim', email='victim@e.com', password=_fixture('correct'))
@@ -292,6 +294,50 @@ class LoginThrottleTests(TestCase):
 
     def test_the_real_password_still_works_before_the_limit(self):
         self.assertEqual(self.attempt(_fixture('correct')), 200)
+
+    def test_a_forged_forwarded_header_does_not_buy_a_fresh_budget(self):
+        """
+        Deployment is Coolify, which puts Traefik in front of the container.
+        Traefik *appends* to `X-Forwarded-For` rather than replacing it, and
+        with `NUM_PROXIES` unset DRF used the whole header as the caller's
+        identity — so rotating a made-up first entry gave every attempt its own
+        bucket, and the rate limit did not exist. Thirteen wrong passwords in a
+        row all returned 401 before this was set.
+        """
+        limit = self.configured_limit()
+
+        statuses = [
+            self.api.post(
+                '/api/auth/login/', {'email': self.address, 'password': f'guess{i}'},
+                format='json', REMOTE_ADDR='10.0.0.9',
+                HTTP_X_FORWARDED_FOR=f'1.2.3.{i}, 203.0.113.7',
+            ).status_code
+            for i in range(limit + 2)
+        ]
+
+        self.assertEqual(statuses[-1], 429, f'forging the header evaded it: {statuses}')
+
+    def test_one_persons_attempts_do_not_spend_anothers(self):
+        """
+        The other way to get this wrong: counting everybody against the proxy's
+        own address, which would let one person lock the platform out.
+        """
+        limit = self.configured_limit()
+
+        for i in range(limit + 2):
+            self.api.post(
+                '/api/auth/login/', {'email': self.address, 'password': f'guess{i}'},
+                format='json', REMOTE_ADDR='10.0.0.9',
+                HTTP_X_FORWARDED_FOR='203.0.113.7',
+            )
+
+        somebody_else = self.api.post(
+            '/api/auth/login/', {'email': self.address, 'password': 'guess'},
+            format='json', REMOTE_ADDR='10.0.0.9',
+            HTTP_X_FORWARDED_FOR='203.0.113.8',
+        )
+
+        self.assertNotEqual(somebody_else.status_code, 429)
 
     def test_signing_up_is_limited_too(self):
         """Otherwise the account table is a free-for-all."""

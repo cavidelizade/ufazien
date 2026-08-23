@@ -143,6 +143,21 @@ REST_FRAMEWORK = {
         'signup': os.getenv('SIGNUP_RATE_LIMIT', '20/hour'),
         'password_reset': os.getenv('PASSWORD_RESET_RATE_LIMIT', '5/hour'),
     },
+    #: How many proxies sit in front of this application.
+    #:
+    #: Rate limiting identifies a caller by address, and unset, DRF uses the
+    #: whole `X-Forwarded-For` header as that identity. The header is written
+    #: by the caller and Traefik *appends* to it rather than replacing it, so
+    #: anybody could rotate a made-up value and get a fresh bucket for every
+    #: attempt — which is the rate limit not existing. Verified: with the
+    #: header rotated, thirteen wrong passwords in a row all returned 401.
+    #:
+    #: Set to the number of hops, so DRF counts back from the end and reads the
+    #: address the proxy itself recorded. Deployment is Coolify, which puts one
+    #: Traefik in front of the container. Raise it if another proxy is added in
+    #: front of that — Cloudflare in proxy mode would make it 2 — because too
+    #: low reads an address the caller controls, and too high reads a proxy's.
+    'NUM_PROXIES': int(os.getenv('NUM_PROXIES', '1')),
     'PAGE_SIZE': 10,  # Default page size for pagination
 }
 

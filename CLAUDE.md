@@ -190,6 +190,16 @@ hall's benches, three metres apart for months.
 
 ## Deployment
 
+**Rate limiting counts hops, so `NUM_PROXIES` has to match the deployment.**
+DRF identifies a caller by address, and unset it uses the whole
+`X-Forwarded-For` header — which the caller writes and Traefik appends to
+rather than replaces, so anybody could rotate a made-up value and get a fresh
+budget for every attempt. Coolify puts one Traefik in front of the container,
+so it is 1. Putting another proxy in front (Cloudflare in proxy mode) makes it
+2: too low reads an address the caller controls, too high reads a proxy's and
+counts everybody against one bucket.
+
+
 Coolify on a Hetzner VPS, not from CI. `ci.yml` runs tests and a frontend build only. Do not add a deploy step to it.
 
 Config lives in Coolify environment variables, not in the repo. `settings.py` reads `DB_HOST`, `DB_PORT`, `ALLOWED_HOSTS`, `DJANGO_CORS_ALLOWED_ORIGINS`, `DJANGO_CSRF_TRUSTED_ORIGINS` and the `LIVEKIT_*` values from the environment.
